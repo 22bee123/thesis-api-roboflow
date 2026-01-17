@@ -68,13 +68,18 @@ def inference_worker():
             
             if response.status_code == 200:
                 data = response.json()
-                # If we scaled the image, we need to scale the boxes back up
+                # If we scaled the image, we need to scale the boxes AND points back up
                 if scale != 1.0:
                     for pred in data.get('predictions', []):
                         pred['x'] = pred['x'] / scale
                         pred['y'] = pred['y'] / scale
                         pred['width'] = pred['width'] / scale
                         pred['height'] = pred['height'] / scale
+                        # Scale segmentation points as well
+                        if 'points' in pred:
+                            for point in pred['points']:
+                                point['x'] = point['x'] / scale
+                                point['y'] = point['y'] / scale
                 
                 with results_lock:
                     latest_results = data
@@ -88,37 +93,84 @@ def inference_worker():
             time.sleep(1) # Wait a bit on error before retrying
 
 def draw_predictions(frame, results):
+    import numpy as np
+    
     if not results or 'predictions' not in results:
         return frame
-        
+    
+    # Create an overlay for transparent masks
+    overlay = frame.copy()
+    
     for pred in results['predictions']:
-        x = pred['x']
-        y = pred['y']
-        w = pred['width']
-        h = pred['height']
         label = pred['class']
         conf = pred['confidence']
         
-        # Calculate coordinates
-        x1 = int(x - w/2)
-        y1 = int(y - h/2)
-        x2 = int(x + w/2)
-        y2 = int(y + h/2)
+        # Colors for the mask (BGR format)
+        # Use blue for flood/water detection for better visibility
+        mask_color = (255, 100, 0)  # Blue-ish color for flood
+        outline_color = (255, 255, 0)  # Cyan for outline
+        text_color = (0, 0, 0)  # Black text
+        bg_color = (255, 255, 0)  # Cyan background for label
         
-        # Colors
-        color = (0, 255, 0) # Green for box
-        text_color = (0, 0, 0) # Black text
-        bg_color = (0, 255, 0) # Green background for label
-        
-        # Draw Box
-        cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
-        
-        # Draw Label with background
-        label_text = f"{label} {conf:.0%}"
-        (text_w, text_h), baseline = cv2.getTextSize(label_text, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 2)
-        
-        cv2.rectangle(frame, (x1, y1 - text_h - 10), (x1 + text_w + 10, y1), bg_color, -1)
-        cv2.putText(frame, label_text, (x1 + 5, y1 - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.6, text_color, 2)
+        # Check if segmentation points are available
+        if 'points' in pred and len(pred['points']) > 0:
+            # Instance Segmentation: Draw polygon mask
+            points = pred['points']
+            # Convert points to numpy array of integers
+            pts = np.array([[int(p['x']), int(p['y'])] for p in points], np.int32)
+            pts = pts.reshape((-1, 1, 2))
+            
+            # Draw filled polygon on overlay
+            cv2.fillPoly(overlay, [pts], mask_color)
+            
+            # Draw polygon outline
+            cv2.polylines(frame, [pts], True, outline_color, 2)
+            
+            # Get centroid for label placement
+            M = cv2.moments(pts)
+            if M['m00'] != 0:
+                cx = int(M['m10'] / M['m00'])
+                cy = int(M['m01'] / M['m00'])
+            else:
+                # Fallback to bounding box center
+                cx = int(pred.get('x', pts[0][0][0]))
+                cy = int(pred.get('y', pts[0][0][1]))
+            
+            # Draw Label with background
+            label_text = f"{label} {conf:.0%}"
+            (text_w, text_h), baseline = cv2.getTextSize(label_text, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 2)
+            
+            # Position label near centroid
+            label_x = cx - text_w // 2
+            label_y = cy - text_h // 2
+            
+            cv2.rectangle(frame, (label_x - 5, label_y - text_h - 5), 
+                         (label_x + text_w + 5, label_y + 5), bg_color, -1)
+            cv2.putText(frame, label_text, (label_x, label_y), 
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.6, text_color, 2)
+        else:
+            # Fallback to bounding box if no segmentation points
+            x = pred['x']
+            y = pred['y']
+            w = pred['width']
+            h = pred['height']
+            
+            x1 = int(x - w/2)
+            y1 = int(y - h/2)
+            x2 = int(x + w/2)
+            y2 = int(y + h/2)
+            
+            cv2.rectangle(frame, (x1, y1), (x2, y2), outline_color, 2)
+            
+            label_text = f"{label} {conf:.0%}"
+            (text_w, text_h), baseline = cv2.getTextSize(label_text, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 2)
+            
+            cv2.rectangle(frame, (x1, y1 - text_h - 10), (x1 + text_w + 10, y1), bg_color, -1)
+            cv2.putText(frame, label_text, (x1 + 5, y1 - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.6, text_color, 2)
+    
+    # Blend the overlay with the original frame for transparency
+    alpha = 0.4  # Transparency factor (0.0 to 1.0)
+    frame = cv2.addWeighted(overlay, alpha, frame, 1 - alpha, 0)
         
     return frame
 
