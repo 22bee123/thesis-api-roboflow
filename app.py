@@ -131,14 +131,28 @@ def draw_water_level_indicator(frame, detected_labels):
     bar_x = width - bar_width - 20
     bar_y = height // 2 - bar_height // 2
     
-    # Calculate water level percentage based on detected (covered) labels
+    # Calculate water level percentage based on MISSING (covered by water) labels
+    # If a color is NOT detected, it means it's covered by water
+    # All 4 visible = 0%, green missing = 25%, green+yellow missing = 50%, etc.
+    
+    detected_lower = [label.lower() for label in detected_labels]
+    
+    # Check which colors are detected (visible, not covered)
+    green_visible = any('green' in label for label in detected_lower)
+    yellow_visible = any('yellow' in label for label in detected_lower)
+    orange_visible = any('orange' in label for label in detected_lower)
+    red_visible = any('red' in label for label in detected_lower)
+    
+    # Calculate water level based on missing colors (from bottom up: green, yellow, orange, red)
     water_level = 0
-    for label in detected_labels:
-        label_lower = label.lower()
-        for key, level in WATER_LEVEL_MAP.items():
-            if key in label_lower:
-                water_level = max(water_level, level)
-                break
+    if not green_visible:
+        water_level = 25  # Green is covered
+    if not yellow_visible and not green_visible:
+        water_level = 50  # Yellow is covered
+    if not orange_visible and not yellow_visible and not green_visible:
+        water_level = 75  # Orange is covered
+    if not red_visible and not orange_visible and not yellow_visible and not green_visible:
+        water_level = 100  # All covered
     
     # Draw the background (empty bar)
     cv2.rectangle(frame, (bar_x, bar_y), (bar_x + bar_width, bar_y + bar_height), (50, 50, 50), -1)
