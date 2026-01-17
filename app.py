@@ -92,25 +92,127 @@ def inference_worker():
             print(f"Inference error: {e}")
             time.sleep(1) # Wait a bit on error before retrying
 
+# Color mapping for labels (BGR format)
+LABEL_COLORS = {
+    'green': (0, 255, 0),      # Green
+    'yellow': (0, 255, 255),   # Yellow
+    'orange': (0, 165, 255),   # Orange
+    'red': (0, 0, 255),        # Red
+}
+
+# Water level mapping: which labels covered = what percentage
+# Green covered = 25%, Yellow covered = 50%, Orange covered = 75%, Red covered = 100%
+WATER_LEVEL_MAP = {
+    'green': 25,
+    'yellow': 50,
+    'orange': 75,
+    'red': 100,
+}
+
+def get_label_color(label):
+    """Get color based on label name (case-insensitive)."""
+    label_lower = label.lower()
+    for key, color in LABEL_COLORS.items():
+        if key in label_lower:
+            return color
+    # Default color if no match
+    return (255, 100, 0)  # Blue-ish default
+
+def draw_water_level_indicator(frame, detected_labels):
+    """
+    Draw a vertical water level indicator based on detected labels.
+    The bar fills up based on which color labels are covered by water.
+    """
+    height, width = frame.shape[:2]
+    
+    # Indicator dimensions and position (right side of frame)
+    bar_width = 40
+    bar_height = 200
+    bar_x = width - bar_width - 20
+    bar_y = height // 2 - bar_height // 2
+    
+    # Calculate water level percentage based on detected (covered) labels
+    water_level = 0
+    for label in detected_labels:
+        label_lower = label.lower()
+        for key, level in WATER_LEVEL_MAP.items():
+            if key in label_lower:
+                water_level = max(water_level, level)
+                break
+    
+    # Draw the background (empty bar)
+    cv2.rectangle(frame, (bar_x, bar_y), (bar_x + bar_width, bar_y + bar_height), (50, 50, 50), -1)
+    cv2.rectangle(frame, (bar_x, bar_y), (bar_x + bar_width, bar_y + bar_height), (255, 255, 255), 2)
+    
+    # Draw the 4 level sections with colors (from bottom to top: green, yellow, orange, red)
+    section_height = bar_height // 4
+    section_colors = [
+        ((0, 255, 0), 'G', 25),      # Green - bottom (25%)
+        ((0, 255, 255), 'Y', 50),    # Yellow (50%)
+        ((0, 165, 255), 'O', 75),    # Orange (75%)
+        ((0, 0, 255), 'R', 100),     # Red - top (100%)
+    ]
+    
+    for i, (color, letter, level) in enumerate(section_colors):
+        section_y = bar_y + bar_height - (i + 1) * section_height
+        # Draw section outline
+        cv2.rectangle(frame, (bar_x, section_y), (bar_x + bar_width, section_y + section_height), color, 1)
+        # Draw letter label
+        cv2.putText(frame, letter, (bar_x + 12, section_y + section_height // 2 + 5), 
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1)
+    
+    # Fill the bar based on water level (fill from bottom up)
+    if water_level > 0:
+        fill_height = int(bar_height * water_level / 100)
+        fill_y = bar_y + bar_height - fill_height
+        
+        # Determine fill color based on water level
+        if water_level >= 100:
+            fill_color = (0, 0, 255)  # Red
+        elif water_level >= 75:
+            fill_color = (0, 165, 255)  # Orange
+        elif water_level >= 50:
+            fill_color = (0, 255, 255)  # Yellow
+        else:
+            fill_color = (0, 255, 0)  # Green
+        
+        # Draw filled portion directly (no transparency needed for the fill)
+        cv2.rectangle(frame, (bar_x + 2, fill_y), (bar_x + bar_width - 2, bar_y + bar_height - 2), fill_color, -1)
+    
+    # Draw water level percentage text
+    cv2.putText(frame, f"{water_level}%", (bar_x - 5, bar_y - 10), 
+               cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+    cv2.putText(frame, "WATER", (bar_x - 10, bar_y + bar_height + 20), 
+               cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+    cv2.putText(frame, "LEVEL", (bar_x - 5, bar_y + bar_height + 40), 
+               cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+    
+    return frame
+
 def draw_predictions(frame, results):
     import numpy as np
     
     if not results or 'predictions' not in results:
+        # Still draw the water level indicator even with no detections
+        frame = draw_water_level_indicator(frame, [])
         return frame
     
     # Create an overlay for transparent masks
     overlay = frame.copy()
     
+    # Collect all detected labels for water level calculation
+    detected_labels = []
+    
     for pred in results['predictions']:
         label = pred['class']
         conf = pred['confidence']
+        detected_labels.append(label)
         
-        # Colors for the mask (BGR format)
-        # Use blue for flood/water detection for better visibility
-        mask_color = (255, 100, 0)  # Blue-ish color for flood
-        outline_color = (255, 255, 0)  # Cyan for outline
+        # Get colors based on label name
+        mask_color = get_label_color(label)
+        outline_color = mask_color
         text_color = (0, 0, 0)  # Black text
-        bg_color = (255, 255, 0)  # Cyan background for label
+        bg_color = mask_color  # Use label color for background
         
         # Check if segmentation points are available
         if 'points' in pred and len(pred['points']) > 0:
@@ -171,6 +273,9 @@ def draw_predictions(frame, results):
     # Blend the overlay with the original frame for transparency
     alpha = 0.4  # Transparency factor (0.0 to 1.0)
     frame = cv2.addWeighted(overlay, alpha, frame, 1 - alpha, 0)
+    
+    # Draw water level indicator
+    frame = draw_water_level_indicator(frame, detected_labels)
         
     return frame
 
