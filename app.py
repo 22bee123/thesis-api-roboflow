@@ -211,6 +211,82 @@ def draw_water_level_indicator(frame, detected_labels):
     
     return frame, water_level
 
+def draw_predictions_no_overlay(frame, results):
+    """Draw predictions on frame WITHOUT water level indicator (for API snapshot)."""
+    global current_water_level, detected_labels_list
+    
+    if not results or 'predictions' not in results:
+        current_water_level = calculate_water_level([])
+        detected_labels_list = []
+        return frame
+    
+    overlay = frame.copy()
+    detected_labels = []
+    
+    for pred in results['predictions']:
+        label = pred['class']
+        conf = pred['confidence']
+        detected_labels.append(label)
+        
+        mask_color = get_label_color(label)
+        outline_color = mask_color
+        text_color = (0, 0, 0)
+        bg_color = mask_color
+        
+        if 'points' in pred and len(pred['points']) > 0:
+            points = pred['points']
+            pts = np.array([[int(p['x']), int(p['y'])] for p in points], np.int32)
+            pts = pts.reshape((-1, 1, 2))
+            
+            cv2.fillPoly(overlay, [pts], mask_color)
+            cv2.polylines(frame, [pts], True, outline_color, 2)
+            
+            M = cv2.moments(pts)
+            if M['m00'] != 0:
+                cx = int(M['m10'] / M['m00'])
+                cy = int(M['m01'] / M['m00'])
+            else:
+                cx = int(pred.get('x', pts[0][0][0]))
+                cy = int(pred.get('y', pts[0][0][1]))
+            
+            label_text = f"{label} {conf:.0%}"
+            (text_w, text_h), baseline = cv2.getTextSize(label_text, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 2)
+            
+            label_x = cx - text_w // 2
+            label_y = cy - text_h // 2
+            
+            cv2.rectangle(frame, (label_x - 5, label_y - text_h - 5), 
+                         (label_x + text_w + 5, label_y + 5), bg_color, -1)
+            cv2.putText(frame, label_text, (label_x, label_y), 
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.6, text_color, 2)
+        else:
+            x = pred['x']
+            y = pred['y']
+            w = pred['width']
+            h = pred['height']
+            
+            x1 = int(x - w/2)
+            y1 = int(y - h/2)
+            x2 = int(x + w/2)
+            y2 = int(y + h/2)
+            
+            cv2.rectangle(frame, (x1, y1), (x2, y2), outline_color, 2)
+            
+            label_text = f"{label} {conf:.0%}"
+            (text_w, text_h), baseline = cv2.getTextSize(label_text, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 2)
+            
+            cv2.rectangle(frame, (x1, y1 - text_h - 10), (x1 + text_w + 10, y1), bg_color, -1)
+            cv2.putText(frame, label_text, (x1 + 5, y1 - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.6, text_color, 2)
+    
+    alpha = 0.4
+    frame = cv2.addWeighted(overlay, alpha, frame, 1 - alpha, 0)
+    
+    # Update global state for API (no visual overlay drawing)
+    current_water_level = calculate_water_level(detected_labels)
+    detected_labels_list = detected_labels
+        
+    return frame
+
 def draw_predictions(frame, results):
     """Draw predictions on frame and return detected labels."""
     global current_water_level, detected_labels_list
@@ -311,7 +387,7 @@ async def get_snapshot():
         if latest_processed_frame is None:
             return Response(content="No frame available", status_code=503)
         
-        _, img_encoded = cv2.imencode('.jpg', latest_processed_frame, [cv2.IMWRITE_JPEG_QUALITY, 85])
+        _, img_encoded = cv2.imencode('.jpg', latest_processed_frame, [cv2.IMWRITE_JPEG_QUALITY, 70])
         return Response(content=img_encoded.tobytes(), media_type="image/jpeg")
 
 @app.get("/api/health")
@@ -371,7 +447,13 @@ def video_capture_loop():
             with results_lock:
                 results = latest_results
             
-            # Draw results on the current frame
+            # Draw results on the current frame (for API - no FPS/Level overlays)
+            api_frame = frame.copy()
+            if results:
+                # Draw segmentation masks only (no water level bar since web UI has it)
+                api_frame = draw_predictions_no_overlay(api_frame, results)
+            
+            # For local display - add FPS and water level
             display_frame = frame.copy()
             if results:
                 display_frame = draw_predictions(display_frame, results)
@@ -386,9 +468,9 @@ def video_capture_loop():
             cv2.putText(display_frame, f"FPS: {int(fps)}", (20, 40), 
                         cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 255), 2)
             
-            # Update processed frame for API
+            # Update processed frame for API (clean, no overlays)
             with processed_frame_lock:
-                latest_processed_frame = display_frame.copy()
+                latest_processed_frame = api_frame.copy()
             
             # Optionally show local window
             if show_window:
