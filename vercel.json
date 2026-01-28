@@ -1,6 +1,0 @@
-{
-    "framework": "nextjs",
-    "buildCommand": "cd flood-detection-web && npm install && npm run build",
-    "outputDirectory": "flood-detection-web/.next",
-    "installCommand": "cd flood-detection-web && npm install"
-}
