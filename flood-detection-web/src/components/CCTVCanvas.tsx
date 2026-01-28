@@ -32,6 +32,9 @@ export default function CCTVCanvas({
         try {
             const response = await fetch(`${backendUrl}/api/status`, {
                 signal: abortControllerRef.current?.signal,
+                headers: {
+                    'ngrok-skip-browser-warning': 'true',
+                },
             });
 
             if (response.ok) {
@@ -58,6 +61,9 @@ export default function CCTVCanvas({
 
             const response = await fetch(url, {
                 signal: abortControllerRef.current?.signal,
+                headers: {
+                    'ngrok-skip-browser-warning': 'true',
+                },
             });
 
             if (response.ok) {
