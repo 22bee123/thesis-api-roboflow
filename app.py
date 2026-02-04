@@ -403,17 +403,11 @@ def video_capture_loop():
     
     print(f"Connecting to RTSP stream: {RTSP_URL[:30]}...")
     
-    # Use RTSP URL with improved connection settings
-    # Try FFMPEG backend with TCP transport for more reliable connection
-    os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = "rtsp_transport;tcp|timeout;5000000"
+    # Use RTSP URL instead of webcam
+    cap = cv2.VideoCapture(RTSP_URL)
     
-    cap = cv2.VideoCapture(RTSP_URL, cv2.CAP_FFMPEG)
-    
-    # Set buffer size to 1 to reduce latency and prevent buffer overflow
+    # Set buffer size to reduce latency
     cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
-    # Set lower resolution if possible to reduce bandwidth
-    cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
-    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
     
     if not cap.isOpened():
         print("Error: Could not open RTSP stream.")
@@ -440,13 +434,8 @@ def video_capture_loop():
                 print("Lost connection to RTSP stream, attempting to reconnect...")
                 cap.release()
                 time.sleep(2)
-                # Reconnect with same settings
-                cap = cv2.VideoCapture(RTSP_URL, cv2.CAP_FFMPEG)
+                cap = cv2.VideoCapture(RTSP_URL)
                 cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
-                cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
-                cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
-                if cap.isOpened():
-                    print("RTSP reconnected successfully!")
                 continue
                 
             # Update global frame for the worker thread
