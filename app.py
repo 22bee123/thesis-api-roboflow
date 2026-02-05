@@ -6,6 +6,7 @@ import time
 import threading
 import numpy as np
 from io import BytesIO
+import asyncio
 
 # FastAPI imports
 from fastapi import FastAPI, Response
@@ -34,6 +35,13 @@ frame_lock = threading.Lock()
 results_lock = threading.Lock()
 processed_frame_lock = threading.Lock()
 
+# ESP32 Alarm Configuration
+ESP32_URL = os.getenv("ESP32_URL", "http://192.168.100.227")  # ESP32 IP address
+alarm_active = False
+alarm_triggered_at = None
+esp32_connected = False
+alarm_lock = threading.Lock()
+
 # FastAPI app
 app = FastAPI(title="Flood Detection API")
 
@@ -45,6 +53,106 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# ============ ESP32 Alarm Functions ============
+
+def trigger_esp32_alarm(duration=0):
+    """
+    Send HTTP request to ESP32 to trigger the alarm.
+    Args:
+        duration: Alarm duration in seconds. 0 means manual stop required.
+    Returns:
+        bool: True if alarm was triggered successfully
+    """
+    global alarm_active, alarm_triggered_at, esp32_connected
+    
+    try:
+        url = f"{ESP32_URL}/trigger-alarm"
+        if duration > 0:
+            url += f"?duration={duration}"
+        
+        response = requests.get(url, timeout=3)
+        
+        if response.status_code == 200:
+            with alarm_lock:
+                alarm_active = True
+                alarm_triggered_at = time.time()
+                esp32_connected = True
+            print(f"🚨 ALARM TRIGGERED! Water level at 100%")
+            return True
+        else:
+            print(f"ESP32 alarm trigger failed: {response.status_code}")
+            return False
+            
+    except requests.exceptions.RequestException as e:
+        print(f"ESP32 connection error: {e}")
+        with alarm_lock:
+            esp32_connected = False
+        return False
+
+def stop_esp32_alarm():
+    """Send HTTP request to ESP32 to stop the alarm."""
+    global alarm_active
+    
+    try:
+        response = requests.get(f"{ESP32_URL}/stop-alarm", timeout=3)
+        
+        if response.status_code == 200:
+            with alarm_lock:
+                alarm_active = False
+            print("🔕 Alarm stopped")
+            return True
+        else:
+            print(f"ESP32 alarm stop failed: {response.status_code}")
+            return False
+            
+    except requests.exceptions.RequestException as e:
+        print(f"ESP32 connection error: {e}")
+        with alarm_lock:
+            esp32_connected = False
+        return False
+
+def check_esp32_status():
+    """Check if ESP32 is connected and get its status."""
+    global esp32_connected, alarm_active
+    
+    try:
+        response = requests.get(f"{ESP32_URL}/status", timeout=2)
+        
+        if response.status_code == 200:
+            data = response.json()
+            with alarm_lock:
+                esp32_connected = True
+                alarm_active = data.get('alarm_active', False)
+            return data
+        else:
+            with alarm_lock:
+                esp32_connected = False
+            return None
+            
+    except requests.exceptions.RequestException:
+        with alarm_lock:
+            esp32_connected = False
+        return None
+
+def check_and_trigger_alarm(water_level):
+    """
+    Check water level and trigger alarm if it reaches 100%.
+    This function should be called whenever water level is updated.
+    """
+    global alarm_active
+    
+    with alarm_lock:
+        was_active = alarm_active
+    
+    if water_level >= 100 and not was_active:
+        # Water level just hit 100% - trigger alarm!
+        threading.Thread(target=trigger_esp32_alarm, daemon=True).start()
+    elif water_level < 100 and was_active:
+        # Water level dropped below 100% - optionally stop alarm
+        # Uncomment below line to auto-stop alarm when water level drops
+        # threading.Thread(target=stop_esp32_alarm, daemon=True).start()
+        pass
 
 def inference_worker():
     """
@@ -139,7 +247,21 @@ def get_label_color(label):
     return (255, 100, 0)
 
 def calculate_water_level(detected_labels):
-    """Calculate water level based on detected/missing labels."""
+    """Calculate water level based on detected/missing labels.
+    
+    Water level logic:
+    - If the model is not detecting any water (no predictions at all), water level is 0.
+    - Water level only rises when:
+      - Some colors are detected AND specific colors are missing (submerged)
+      - 25% = green not visible (but other colors detected)
+      - 50% = green and yellow not visible
+      - 75% = green, yellow, and orange not visible
+      - 100% = no colors visible but water is detected
+    """
+    # If no labels detected at all, water level is 0 (no water in frame)
+    if not detected_labels:
+        return 0
+    
     detected_lower = [label.lower() for label in detected_labels]
     
     green_visible = any('green' in label for label in detected_lower)
@@ -147,6 +269,16 @@ def calculate_water_level(detected_labels):
     orange_visible = any('orange' in label for label in detected_lower)
     red_visible = any('red' in label for label in detected_lower)
     
+    # Check if any color label is detected (meaning the model is detecting the gauge)
+    any_color_detected = green_visible or yellow_visible or orange_visible or red_visible
+    
+    # If no color labels are detected but we have other detections, 
+    # this means something else is detected (not the water level gauge)
+    # In this case, we can't determine water level
+    if not any_color_detected:
+        return 0
+    
+    # Calculate water level based on which colors are submerged (not visible)
     water_level = 0
     if not green_visible:
         water_level = 25
@@ -284,6 +416,9 @@ def draw_predictions_no_overlay(frame, results):
     # Update global state for API (no visual overlay drawing)
     current_water_level = calculate_water_level(detected_labels)
     detected_labels_list = detected_labels
+    
+    # Check if alarm should be triggered
+    check_and_trigger_alarm(current_water_level)
         
     return frame
 
@@ -363,6 +498,9 @@ def draw_predictions(frame, results):
     # Update global state for API
     current_water_level = water_level
     detected_labels_list = detected_labels
+    
+    # Check if alarm should be triggered
+    check_and_trigger_alarm(current_water_level)
         
     return frame
 
@@ -370,12 +508,18 @@ def draw_predictions(frame, results):
 
 @app.get("/api/status")
 async def get_status():
-    """Return current detection status and water level."""
+    """Return current detection status, water level, and alarm state."""
+    # Check ESP32 connectivity (runs in thread to not block)
+    check_esp32_status()
+    
     return {
         "water_level": current_water_level,
         "detected_labels": detected_labels_list,
         "timestamp": time.time(),
-        "connected": latest_frame is not None
+        "connected": latest_frame is not None,
+        "alarm_active": alarm_active,
+        "esp32_connected": esp32_connected,
+        "esp32_url": ESP32_URL
     }
 
 @app.get("/api/snapshot")
@@ -394,6 +538,45 @@ async def get_snapshot():
 async def health_check():
     """Health check endpoint."""
     return {"status": "ok", "rtsp_connected": latest_frame is not None}
+
+# ============ Alarm API Endpoints ============
+
+@app.post("/api/alarm/trigger")
+async def trigger_alarm(duration: int = 0):
+    """
+    Manually trigger the ESP32 alarm.
+    Args:
+        duration: Optional. Alarm duration in seconds. 0 means manual stop required.
+    """
+    success = trigger_esp32_alarm(duration)
+    return {
+        "success": success,
+        "alarm_active": alarm_active,
+        "esp32_connected": esp32_connected,
+        "message": "Alarm triggered" if success else "Failed to trigger alarm"
+    }
+
+@app.post("/api/alarm/stop")
+async def stop_alarm():
+    """Manually stop the ESP32 alarm."""
+    success = stop_esp32_alarm()
+    return {
+        "success": success,
+        "alarm_active": alarm_active,
+        "message": "Alarm stopped" if success else "Failed to stop alarm"
+    }
+
+@app.get("/api/alarm/status")
+async def get_alarm_status():
+    """Get detailed alarm and ESP32 status."""
+    esp32_status = check_esp32_status()
+    return {
+        "alarm_active": alarm_active,
+        "esp32_connected": esp32_connected,
+        "esp32_url": ESP32_URL,
+        "alarm_triggered_at": alarm_triggered_at,
+        "esp32_details": esp32_status
+    }
 
 # ============ Main Video Processing ============
 
@@ -496,11 +679,15 @@ def main():
     print("Flood Detection System - RTSP + API Server")
     print("=" * 50)
     print(f"RTSP URL: {RTSP_URL[:30]}...")
+    print(f"ESP32 URL: {ESP32_URL}")
     print("API will be available at: http://localhost:8000")
     print("Endpoints:")
-    print("  - GET /api/status   - Water level & detection data")
-    print("  - GET /api/snapshot - Latest processed frame (JPEG)")
-    print("  - GET /api/health   - Health check")
+    print("  - GET  /api/status        - Water level & detection data")
+    print("  - GET  /api/snapshot      - Latest processed frame (JPEG)")
+    print("  - GET  /api/health        - Health check")
+    print("  - POST /api/alarm/trigger - Trigger ESP32 alarm")
+    print("  - POST /api/alarm/stop    - Stop ESP32 alarm")
+    print("  - GET  /api/alarm/status  - Get alarm status")
     print("=" * 50)
     print("Press 'q' in the video window to quit")
     print()

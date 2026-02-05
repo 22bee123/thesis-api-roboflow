@@ -23,14 +23,14 @@ export default function WaterLevelIndicator({ waterLevel }: WaterLevelIndicatorP
     };
 
     return (
-        <div className="flex flex-col items-center gap-2">
+        <div className="flex flex-col items-center gap-1 sm:gap-2">
             {/* Percentage display */}
-            <span className="text-white text-xl font-bold drop-shadow-lg">
+            <span className="text-white text-base sm:text-xl font-bold drop-shadow-lg">
                 {waterLevel}%
             </span>
 
             {/* Water level bar container */}
-            <div className="relative w-12 h-52 bg-gray-800/80 border-2 border-white/80 rounded-lg overflow-hidden backdrop-blur-sm">
+            <div className="relative w-10 sm:w-12 h-40 sm:h-52 bg-gray-800/80 border-2 border-white/80 rounded-md sm:rounded-lg overflow-hidden backdrop-blur-sm">
                 {/* Section markers */}
                 <div className="absolute inset-0 flex flex-col-reverse">
                     {sections.map((section, index) => (
@@ -38,7 +38,7 @@ export default function WaterLevelIndicator({ waterLevel }: WaterLevelIndicatorP
                             key={section.letter}
                             className={`relative flex-1 border-t ${section.borderColor} flex items-center justify-center`}
                         >
-                            <span className={`text-sm font-bold ${section.borderColor.replace('border-', 'text-')} drop-shadow`}>
+                            <span className={`text-xs sm:text-sm font-bold ${section.borderColor.replace('border-', 'text-')} drop-shadow`}>
                                 {section.letter}
                             </span>
                         </div>
@@ -54,8 +54,8 @@ export default function WaterLevelIndicator({ waterLevel }: WaterLevelIndicatorP
 
             {/* Label */}
             <div className="text-center">
-                <p className="text-white text-sm font-semibold drop-shadow">WATER</p>
-                <p className="text-white text-sm font-semibold drop-shadow">LEVEL</p>
+                <p className="text-white text-xs sm:text-sm font-semibold drop-shadow">WATER</p>
+                <p className="text-white text-xs sm:text-sm font-semibold drop-shadow">LEVEL</p>
             </div>
         </div>
     );
