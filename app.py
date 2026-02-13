@@ -10,7 +10,6 @@ import asyncio
 
 # FastAPI imports
 from fastapi import FastAPI, Response
-from fastapi.middleware.cors import CORSMiddleware
 import uvicorn
 
 # Configuration
@@ -50,14 +49,29 @@ VIEWER_TIMEOUT = 15  # seconds before a viewer is considered disconnected
 # FastAPI app
 app = FastAPI(title="Flood Detection API")
 
-# Add CORS middleware for Vercel frontend
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],  # In production, specify your Vercel domain
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+# Add CORS middleware - custom implementation for tunnel compatibility
+from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.requests import Request as StarletteRequest
+from starlette.responses import Response as StarletteResponse
+
+class CustomCORSMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request: StarletteRequest, call_next):
+        # Handle preflight OPTIONS requests directly
+        if request.method == "OPTIONS":
+            response = StarletteResponse(status_code=200)
+        else:
+            response = await call_next(request)
+        
+        # Add CORS headers to ALL responses
+        origin = request.headers.get("origin", "*")
+        response.headers["Access-Control-Allow-Origin"] = origin
+        response.headers["Access-Control-Allow-Methods"] = "GET, POST, PUT, DELETE, OPTIONS"
+        response.headers["Access-Control-Allow-Headers"] = "*, Content-Type, Authorization, ngrok-skip-browser-warning"
+        response.headers["Access-Control-Allow-Credentials"] = "true"
+        response.headers["Access-Control-Max-Age"] = "3600"
+        return response
+
+app.add_middleware(CustomCORSMiddleware)
 
 # ============ ESP32 Alarm Functions ============
 

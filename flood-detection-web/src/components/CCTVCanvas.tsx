@@ -155,9 +155,11 @@ export default function CCTVCanvas({
         // Disconnect on page unload
         const handleUnload = () => {
             if (viewerIdRef.current) {
-                navigator.sendBeacon(
-                    `${backendUrl}/api/viewer/disconnect?viewer_id=${viewerIdRef.current}`
-                );
+                fetch(`${backendUrl}/api/viewer/disconnect?viewer_id=${viewerIdRef.current}`, {
+                    method: 'POST',
+                    keepalive: true,
+                    headers: { 'ngrok-skip-browser-warning': 'true' },
+                }).catch(() => { });
             }
         };
         window.addEventListener('beforeunload', handleUnload);
