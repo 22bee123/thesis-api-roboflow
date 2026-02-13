@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useState, useCallback, useRef } from 'react';
+import { useEffect, useState, useRef } from 'react';
 import WaterLevelIndicator from './WaterLevelIndicator';
 
 interface CCTVCanvasProps {
@@ -28,111 +28,113 @@ export default function CCTVCanvas({
     const [isConnected, setIsConnected] = useState(false);
     const [fps, setFps] = useState(0);
 
+    // Use refs to avoid dependency cycles in the polling loop
+    const imageUrlRef = useRef<string>('');
     const fpsCounterRef = useRef<number[]>([]);
-    const abortControllerRef = useRef<AbortController | null>(null);
+    const onStatusUpdateRef = useRef(onStatusUpdate);
+    const mountedRef = useRef(true);
 
-    // Fetch status from backend
-    const fetchStatus = useCallback(async () => {
-        try {
-            const response = await fetch(`${backendUrl}/api/status`, {
-                signal: abortControllerRef.current?.signal,
-                headers: {
-                    'ngrok-skip-browser-warning': 'true',
-                },
-            });
+    // Keep the ref in sync with the prop
+    onStatusUpdateRef.current = onStatusUpdate;
 
-            if (response.ok) {
-                const data: CCTVStatus = await response.json();
-                setStatus(data);
-                setIsConnected(data.connected);
-                setError(null);
-                onStatusUpdate?.(data);
-            } else {
-                throw new Error(`Status error: ${response.status}`);
-            }
-        } catch (err) {
-            if ((err as Error).name !== 'AbortError') {
+    // Stable polling loop — runs once on mount, no dependency cycle
+    useEffect(() => {
+        mountedRef.current = true;
+        let snapshotTimer: ReturnType<typeof setTimeout>;
+        let statusTimer: ReturnType<typeof setInterval>;
+
+        // Fetch status from backend
+        const fetchStatus = async () => {
+            try {
+                const response = await fetch(`${backendUrl}/api/status`, {
+                    headers: {
+                        'ngrok-skip-browser-warning': 'true',
+                    },
+                });
+
+                if (!mountedRef.current) return;
+
+                if (response.ok) {
+                    const data: CCTVStatus = await response.json();
+                    setStatus(data);
+                    setIsConnected(data.connected);
+                    setError(null);
+                    onStatusUpdateRef.current?.(data);
+                } else {
+                    throw new Error(`Status error: ${response.status}`);
+                }
+            } catch (err) {
+                if (!mountedRef.current) return;
                 console.error('Status fetch error:', err);
             }
-        }
-    }, [backendUrl, onStatusUpdate]);
+        };
 
-    // Fetch snapshot from backend
-    const fetchSnapshot = useCallback(async () => {
-        try {
-            // Add timestamp to prevent caching
-            const url = `${backendUrl}/api/snapshot?t=${Date.now()}`;
+        // Fetch snapshot from backend — uses setTimeout chaining instead of setInterval
+        // to prevent overlapping requests
+        const fetchSnapshot = async () => {
+            try {
+                const url = `${backendUrl}/api/snapshot?t=${Date.now()}`;
 
-            const response = await fetch(url, {
-                signal: abortControllerRef.current?.signal,
-                headers: {
-                    'ngrok-skip-browser-warning': 'true',
-                },
-            });
+                const response = await fetch(url, {
+                    headers: {
+                        'ngrok-skip-browser-warning': 'true',
+                    },
+                });
 
-            if (response.ok) {
-                const blob = await response.blob();
-                const objectUrl = URL.createObjectURL(blob);
+                if (!mountedRef.current) return;
 
-                // Revoke old URL to prevent memory leak
-                if (imageUrl) {
-                    URL.revokeObjectURL(imageUrl);
+                if (response.ok) {
+                    const blob = await response.blob();
+                    const objectUrl = URL.createObjectURL(blob);
+
+                    // Revoke old URL to prevent memory leak
+                    if (imageUrlRef.current) {
+                        URL.revokeObjectURL(imageUrlRef.current);
+                    }
+
+                    imageUrlRef.current = objectUrl;
+                    setImageUrl(objectUrl);
+                    setError(null);
+                    setIsConnected(true);
+
+                    // Calculate FPS
+                    const now = performance.now();
+                    fpsCounterRef.current.push(now);
+                    fpsCounterRef.current = fpsCounterRef.current.filter(t => now - t < 1000);
+                    setFps(fpsCounterRef.current.length);
+                } else if (response.status === 503) {
+                    setError('Waiting for camera feed...');
+                    setIsConnected(false);
+                } else {
+                    throw new Error(`Snapshot error: ${response.status}`);
                 }
-
-                setImageUrl(objectUrl);
-                setError(null);
-                setIsConnected(true);
-
-                // Calculate FPS
-                const now = performance.now();
-                fpsCounterRef.current.push(now);
-                fpsCounterRef.current = fpsCounterRef.current.filter(t => now - t < 1000);
-                setFps(fpsCounterRef.current.length);
-            } else if (response.status === 503) {
-                setError('Waiting for camera feed...');
-                setIsConnected(false);
-            } else {
-                throw new Error(`Snapshot error: ${response.status}`);
-            }
-        } catch (err) {
-            if ((err as Error).name !== 'AbortError') {
+            } catch (err) {
+                if (!mountedRef.current) return;
                 console.error('Snapshot fetch error:', err);
                 setError('Cannot connect to backend server');
                 setIsConnected(false);
             }
-        }
-    }, [backendUrl, imageUrl]);
 
-    // Polling loop
-    useEffect(() => {
-        abortControllerRef.current = new AbortController();
+            // Schedule next snapshot fetch (chained setTimeout prevents overlap)
+            if (mountedRef.current) {
+                snapshotTimer = setTimeout(fetchSnapshot, 200);
+            }
+        };
 
-        // Initial fetch
+        // Start polling
         fetchSnapshot();
         fetchStatus();
-
-        // Set up intervals
-        const snapshotInterval = setInterval(fetchSnapshot, 200); // ~5 FPS
-        const statusInterval = setInterval(fetchStatus, 1000); // 1 Hz for status
+        statusTimer = setInterval(fetchStatus, 1000);
 
         return () => {
-            abortControllerRef.current?.abort();
-            clearInterval(snapshotInterval);
-            clearInterval(statusInterval);
-            if (imageUrl) {
-                URL.revokeObjectURL(imageUrl);
+            mountedRef.current = false;
+            clearTimeout(snapshotTimer);
+            clearInterval(statusTimer);
+            if (imageUrlRef.current) {
+                URL.revokeObjectURL(imageUrlRef.current);
             }
         };
-    }, [fetchSnapshot, fetchStatus]);
-
-    // Cleanup imageUrl on unmount
-    useEffect(() => {
-        return () => {
-            if (imageUrl) {
-                URL.revokeObjectURL(imageUrl);
-            }
-        };
-    }, [imageUrl]);
+    }, [backendUrl]); // Only depends on backendUrl — stable!
 
     return (
         <div className="relative w-full h-full min-h-[250px] sm:min-h-[350px] bg-gray-900 rounded-lg sm:rounded-xl overflow-hidden shadow-2xl">
@@ -145,7 +147,7 @@ export default function CCTVCanvas({
                 />
             )}
 
-            {/* Water Level Indicator - positioned differently on mobile */}
+            {/* Water Level Indicator */}
             <div className="absolute right-2 sm:right-4 top-1/2 -translate-y-1/2 scale-75 sm:scale-100 origin-right">
                 <WaterLevelIndicator waterLevel={status?.water_level ?? 0} />
             </div>
