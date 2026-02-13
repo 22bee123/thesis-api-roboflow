@@ -16,6 +16,7 @@ interface CCTVStatus {
     alarm_active?: boolean;
     esp32_connected?: boolean;
     esp32_url?: string;
+    viewer_count?: number;
 }
 
 export default function CCTVCanvas({
@@ -27,34 +28,11 @@ export default function CCTVCanvas({
     const [error, setError] = useState<string | null>(null);
     const [isConnected, setIsConnected] = useState(false);
     const [fps, setFps] = useState(0);
-    const [alarmToggling, setAlarmToggling] = useState(false);
+    const [viewerCount, setViewerCount] = useState(0);
+
     const fpsCounterRef = useRef<number[]>([]);
     const abortControllerRef = useRef<AbortController | null>(null);
-
-    // Toggle alarm on/off
-    const toggleAlarm = async () => {
-        if (alarmToggling) return;
-        setAlarmToggling(true);
-
-        try {
-            const endpoint = status?.alarm_active ? '/api/alarm/stop' : '/api/alarm/trigger';
-            const response = await fetch(`${backendUrl}${endpoint}`, {
-                method: 'POST',
-                headers: {
-                    'ngrok-skip-browser-warning': 'true',
-                },
-            });
-
-            if (response.ok) {
-                // Refresh status immediately
-                await fetchStatus();
-            }
-        } catch (err) {
-            console.error('Alarm toggle error:', err);
-        } finally {
-            setAlarmToggling(false);
-        }
-    };
+    const viewerIdRef = useRef<string | null>(null);
 
     // Fetch status from backend
     const fetchStatus = useCallback(async () => {
@@ -70,6 +48,7 @@ export default function CCTVCanvas({
                 const data: CCTVStatus = await response.json();
                 setStatus(data);
                 setIsConnected(data.connected);
+                setViewerCount(data.viewer_count ?? 0);
                 setError(null);
                 onStatusUpdate?.(data);
             } else {
@@ -150,6 +129,52 @@ export default function CCTVCanvas({
         };
     }, [fetchSnapshot, fetchStatus]);
 
+    // Viewer heartbeat
+    useEffect(() => {
+        const sendHeartbeat = async () => {
+            try {
+                const params = viewerIdRef.current ? `?viewer_id=${viewerIdRef.current}` : '';
+                const response = await fetch(`${backendUrl}/api/viewer/heartbeat${params}`, {
+                    method: 'POST',
+                    headers: { 'ngrok-skip-browser-warning': 'true' },
+                });
+                if (response.ok) {
+                    const data = await response.json();
+                    viewerIdRef.current = data.viewer_id;
+                    setViewerCount(data.viewer_count);
+                }
+            } catch (err) {
+                console.error('Heartbeat error:', err);
+            }
+        };
+
+        // Initial heartbeat
+        sendHeartbeat();
+        const heartbeatInterval = setInterval(sendHeartbeat, 5000);
+
+        // Disconnect on page unload
+        const handleUnload = () => {
+            if (viewerIdRef.current) {
+                navigator.sendBeacon(
+                    `${backendUrl}/api/viewer/disconnect?viewer_id=${viewerIdRef.current}`
+                );
+            }
+        };
+        window.addEventListener('beforeunload', handleUnload);
+
+        return () => {
+            clearInterval(heartbeatInterval);
+            window.removeEventListener('beforeunload', handleUnload);
+            // Send disconnect on unmount
+            if (viewerIdRef.current) {
+                fetch(`${backendUrl}/api/viewer/disconnect?viewer_id=${viewerIdRef.current}`, {
+                    method: 'POST',
+                    headers: { 'ngrok-skip-browser-warning': 'true' },
+                }).catch(() => { });
+            }
+        };
+    }, [backendUrl]);
+
     // Cleanup imageUrl on unmount
     useEffect(() => {
         return () => {
@@ -182,12 +207,23 @@ export default function CCTVCanvas({
                 </span>
             </div>
 
-            {/* Connection Status */}
-            <div className="absolute top-2 sm:top-4 left-1/2 -translate-x-1/2 flex items-center gap-1.5 sm:gap-2 bg-black/50 px-2 sm:px-3 py-1 sm:py-2 rounded-md sm:rounded-lg backdrop-blur-sm">
-                <div className={`w-1.5 h-1.5 sm:w-2 sm:h-2 rounded-full ${isConnected ? 'bg-green-500 animate-pulse' : 'bg-red-500'}`} />
-                <span className="text-white text-xs sm:text-sm font-medium">
-                    {isConnected ? 'Connected' : 'Disconnected'}
-                </span>
+            {/* Connection Status & Viewer Count */}
+            <div className="absolute top-2 sm:top-4 left-1/2 -translate-x-1/2 flex items-center gap-3 sm:gap-4 bg-black/50 px-2 sm:px-3 py-1 sm:py-2 rounded-md sm:rounded-lg backdrop-blur-sm">
+                <div className="flex items-center gap-1.5 sm:gap-2">
+                    <div className={`w-1.5 h-1.5 sm:w-2 sm:h-2 rounded-full ${isConnected ? 'bg-green-500 animate-pulse' : 'bg-red-500'}`} />
+                    <span className="text-white text-xs sm:text-sm font-medium">
+                        {isConnected ? 'Connected' : 'Disconnected'}
+                    </span>
+                </div>
+                <div className="flex items-center gap-1.5">
+                    <svg className="w-3.5 h-3.5 sm:w-4 sm:h-4 text-gray-300" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z" />
+                    </svg>
+                    <span className="text-gray-300 text-xs sm:text-sm font-medium">
+                        {viewerCount}
+                    </span>
+                </div>
             </div>
 
             {/* Backend URL indicator - hidden on mobile */}
@@ -197,35 +233,15 @@ export default function CCTVCanvas({
                 </span>
             </div>
 
-            {/* ESP32 Alarm Toggle Switch */}
-            <div className="absolute top-2 sm:top-4 right-2 sm:right-4 flex items-center gap-2 sm:gap-3 bg-black/70 px-3 sm:px-4 py-2 sm:py-3 rounded-lg sm:rounded-xl backdrop-blur-sm">
-                {/* Connection indicator */}
-                <div className="flex items-center gap-1.5">
-                    <div className={`w-2 h-2 rounded-full ${status?.esp32_connected ? 'bg-green-500 animate-pulse' : 'bg-red-500'}`} />
-                    <span className="text-gray-300 text-xs">
-                        {status?.esp32_connected ? 'ESP32' : 'ESP32 Offline'}
-                    </span>
-                </div>
-
-                {/* Toggle Switch */}
-                <button
-                    onClick={toggleAlarm}
-                    disabled={alarmToggling || !status?.esp32_connected}
-                    className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors duration-300 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-offset-gray-900 ${status?.alarm_active
-                            ? 'bg-red-600 focus:ring-red-500'
-                            : 'bg-gray-600 focus:ring-gray-500'
-                        } ${(!status?.esp32_connected || alarmToggling) ? 'opacity-50 cursor-not-allowed' : 'cursor-pointer hover:opacity-90'}`}
-                >
-                    <span
-                        className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform duration-300 ${status?.alarm_active ? 'translate-x-6' : 'translate-x-1'
-                            } ${alarmToggling ? 'animate-pulse' : ''}`}
-                    />
-                </button>
-
-                {/* Alarm status label */}
-                <span className={`text-xs font-medium ${status?.alarm_active ? 'text-red-400' : 'text-gray-400'}`}>
-                    {alarmToggling ? '...' : (status?.alarm_active ? 'ON' : 'OFF')}
+            {/* ESP32 Connection Status */}
+            <div className="absolute top-2 sm:top-4 right-2 sm:right-4 flex items-center gap-2 bg-black/70 px-3 sm:px-4 py-2 sm:py-3 rounded-lg sm:rounded-xl backdrop-blur-sm">
+                <div className={`w-2 h-2 rounded-full ${status?.esp32_connected ? 'bg-green-500 animate-pulse' : 'bg-red-500'}`} />
+                <span className="text-gray-300 text-xs">
+                    {status?.esp32_connected ? 'ESP32 Connected' : 'ESP32 Offline'}
                 </span>
+                {status?.alarm_active && (
+                    <span className="text-red-400 text-xs font-medium animate-pulse">🔔 ALARM</span>
+                )}
             </div>
 
             {/* Alarm Alert Overlay - Shows when water level is 100% */}

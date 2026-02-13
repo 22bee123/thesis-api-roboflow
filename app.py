@@ -42,6 +42,11 @@ alarm_triggered_at = None
 esp32_connected = False
 alarm_lock = threading.Lock()
 
+# Viewer tracking
+active_viewers = {}  # {viewer_id: last_heartbeat_timestamp}
+viewers_lock = threading.Lock()
+VIEWER_TIMEOUT = 15  # seconds before a viewer is considered disconnected
+
 # FastAPI app
 app = FastAPI(title="Flood Detection API")
 
@@ -512,6 +517,14 @@ async def get_status():
     # Check ESP32 connectivity (runs in thread to not block)
     check_esp32_status()
     
+    # Clean up stale viewers
+    now = time.time()
+    with viewers_lock:
+        stale = [vid for vid, ts in active_viewers.items() if now - ts > VIEWER_TIMEOUT]
+        for vid in stale:
+            del active_viewers[vid]
+        viewer_count = len(active_viewers)
+    
     return {
         "water_level": current_water_level,
         "detected_labels": detected_labels_list,
@@ -519,7 +532,8 @@ async def get_status():
         "connected": latest_frame is not None,
         "alarm_active": alarm_active,
         "esp32_connected": esp32_connected,
-        "esp32_url": ESP32_URL
+        "esp32_url": ESP32_URL,
+        "viewer_count": viewer_count
     }
 
 @app.get("/api/snapshot")
@@ -538,6 +552,27 @@ async def get_snapshot():
 async def health_check():
     """Health check endpoint."""
     return {"status": "ok", "rtsp_connected": latest_frame is not None}
+
+@app.post("/api/viewer/heartbeat")
+async def viewer_heartbeat(viewer_id: str = ""):
+    """Register or refresh a viewer's heartbeat."""
+    if not viewer_id:
+        import uuid
+        viewer_id = str(uuid.uuid4())
+    
+    with viewers_lock:
+        active_viewers[viewer_id] = time.time()
+        viewer_count = len(active_viewers)
+    
+    return {"viewer_id": viewer_id, "viewer_count": viewer_count}
+
+@app.post("/api/viewer/disconnect")
+async def viewer_disconnect(viewer_id: str = ""):
+    """Remove a viewer when they leave."""
+    if viewer_id:
+        with viewers_lock:
+            active_viewers.pop(viewer_id, None)
+    return {"success": True}
 
 # ============ Alarm API Endpoints ============
 
