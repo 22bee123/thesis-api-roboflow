@@ -10,6 +10,7 @@ import asyncio
 
 # FastAPI imports
 from fastapi import FastAPI, Response
+from fastapi.middleware.cors import CORSMiddleware
 import uvicorn
 
 # Configuration
@@ -41,37 +42,17 @@ alarm_triggered_at = None
 esp32_connected = False
 alarm_lock = threading.Lock()
 
-# Viewer tracking
-active_viewers = {}  # {viewer_id: last_heartbeat_timestamp}
-viewers_lock = threading.Lock()
-VIEWER_TIMEOUT = 15  # seconds before a viewer is considered disconnected
-
 # FastAPI app
 app = FastAPI(title="Flood Detection API")
 
-# Add CORS middleware - custom implementation for tunnel compatibility
-from starlette.middleware.base import BaseHTTPMiddleware
-from starlette.requests import Request as StarletteRequest
-from starlette.responses import Response as StarletteResponse
-
-class CustomCORSMiddleware(BaseHTTPMiddleware):
-    async def dispatch(self, request: StarletteRequest, call_next):
-        # Handle preflight OPTIONS requests directly
-        if request.method == "OPTIONS":
-            response = StarletteResponse(status_code=200)
-        else:
-            response = await call_next(request)
-        
-        # Add CORS headers to ALL responses
-        origin = request.headers.get("origin", "*")
-        response.headers["Access-Control-Allow-Origin"] = origin
-        response.headers["Access-Control-Allow-Methods"] = "GET, POST, PUT, DELETE, OPTIONS"
-        response.headers["Access-Control-Allow-Headers"] = "*, Content-Type, Authorization, ngrok-skip-browser-warning"
-        response.headers["Access-Control-Allow-Credentials"] = "true"
-        response.headers["Access-Control-Max-Age"] = "3600"
-        return response
-
-app.add_middleware(CustomCORSMiddleware)
+# Add CORS middleware for Vercel frontend
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # In production, specify your Vercel domain
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 # ============ ESP32 Alarm Functions ============
 
@@ -531,14 +512,6 @@ async def get_status():
     # Check ESP32 connectivity (runs in thread to not block)
     check_esp32_status()
     
-    # Clean up stale viewers
-    now = time.time()
-    with viewers_lock:
-        stale = [vid for vid, ts in active_viewers.items() if now - ts > VIEWER_TIMEOUT]
-        for vid in stale:
-            del active_viewers[vid]
-        viewer_count = len(active_viewers)
-    
     return {
         "water_level": current_water_level,
         "detected_labels": detected_labels_list,
@@ -546,8 +519,7 @@ async def get_status():
         "connected": latest_frame is not None,
         "alarm_active": alarm_active,
         "esp32_connected": esp32_connected,
-        "esp32_url": ESP32_URL,
-        "viewer_count": viewer_count
+        "esp32_url": ESP32_URL
     }
 
 @app.get("/api/snapshot")
@@ -566,27 +538,6 @@ async def get_snapshot():
 async def health_check():
     """Health check endpoint."""
     return {"status": "ok", "rtsp_connected": latest_frame is not None}
-
-@app.post("/api/viewer/heartbeat")
-async def viewer_heartbeat(viewer_id: str = ""):
-    """Register or refresh a viewer's heartbeat."""
-    if not viewer_id:
-        import uuid
-        viewer_id = str(uuid.uuid4())
-    
-    with viewers_lock:
-        active_viewers[viewer_id] = time.time()
-        viewer_count = len(active_viewers)
-    
-    return {"viewer_id": viewer_id, "viewer_count": viewer_count}
-
-@app.post("/api/viewer/disconnect")
-async def viewer_disconnect(viewer_id: str = ""):
-    """Remove a viewer when they leave."""
-    if viewer_id:
-        with viewers_lock:
-            active_viewers.pop(viewer_id, None)
-    return {"success": True}
 
 # ============ Alarm API Endpoints ============
 
